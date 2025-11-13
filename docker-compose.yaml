@@ -1,0 +1,273 @@
+services:
+  # TiDB CLUSTER (PD + TiKV + TiDB)
+  pd:
+    image: pingcap/pd:v6.5.0
+    container_name: pd
+    hostname: pd
+    command:
+      - --name=pd0
+      - --data-dir=/data
+      - --client-urls=http://0.0.0.0:2379
+      - --peer-urls=http://0.0.0.0:2380
+      - --advertise-client-urls=http://pd:2379
+      - --advertise-peer-urls=http://pd:2380
+      - --initial-cluster=pd0=http://pd:2380
+    ports:
+      - "2379:2379"
+    volumes:
+      - pd_data:/data
+    networks:
+      - my_album_shelf_network
+    restart: unless-stopped
+
+  tikv:
+    image: pingcap/tikv:v6.5.0
+    container_name: tikv
+    hostname: tikv
+    command:
+      - --pd-endpoints=http://pd:2379
+      - --data-dir=/data
+      - --addr=0.0.0.0:20160
+      - --status-addr=0.0.0.0:20180
+      - --advertise-addr=tikv:20160
+    ports:
+      - "20160:20160"
+    volumes:
+      - tikv_data:/data
+    depends_on:
+      - pd
+    networks:
+      - my_album_shelf_network
+    restart: unless-stopped
+
+  tidb:
+    image: pingcap/tidb:v6.5.0
+    container_name: tidb
+    hostname: tidb
+    command:
+      - --store=tikv
+      - --path=pd:2379
+      - --host=0.0.0.0
+      - -P=4000
+      - --status=10080
+      - --advertise-address=tidb
+    ports:
+      - "4000:4000"
+      - "10080:10080" # status API (health)
+    depends_on:
+      - tikv
+      - pd
+    networks:
+      - my_album_shelf_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:10080/status || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  
+  # message queue
+  
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    hostname: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    volumes:
+      - zk_data:/var/lib/zookeeper/data
+      - zk_logs:/var/lib/zookeeper/log
+    networks:
+      - my_album_shelf_network
+    restart: unless-stopped
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    hostname: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"   # to host (WSL / Windows)
+      - "29092:29092" # to services inside the docker network
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_DELETE_TOPIC_ENABLE: "true"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - my_album_shelf_network
+    restart: unless-stopped
+
+  
+  # TiCDC + CDC TASK (CDC -> Kafka topic: tidb_changes)
+  
+  ticdc:
+    image: pingcap/ticdc:v6.5.0
+    container_name: ticdc
+    hostname: ticdc
+    command:
+      - /cdc
+      - server
+      - --pd=http://pd:2379
+      - --addr=0.0.0.0:8300
+      - --advertise-addr=ticdc:8300
+      - --gc-ttl=86400
+    ports:
+      - "8300:8300"
+    depends_on:
+      tidb:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    volumes:
+      - ticdc_logs:/logs
+    networks:
+      - my_album_shelf_network
+    restart: unless-stopped
+
+  cdc-task:
+    image: pingcap/ticdc:v6.5.0
+    container_name: cdc-task
+    depends_on:
+      - ticdc
+    networks:
+      - my_album_shelf_network
+    restart: "no"
+    command: >
+      sh -c "
+        echo 'Waiting for TiCDC to be ready...' &&
+        sleep 40 &&
+        echo 'Creating changefeed for ALL tables in my_album_shelf database...' &&
+        /cdc cli changefeed create
+          --server=http://ticdc:8300
+          --changefeed-id='my-album-shelf-cdc'
+          --sink-uri='kafka://kafka:29092/tidb_changes?protocol=canal-json'
+          --rules-filter='my_album_shelf.*'
+        && echo 'Changefeed created successfully'
+      "
+
+  
+  # DB INIT (run db/init.js once)
+  db:
+    build:
+      context: ./db
+      dockerfile: Dockerfile
+    container_name: db
+    working_dir: /app
+    volumes:
+      - ./db:/app/db
+      - ./db/init.js:/app/init.js
+    environment:
+      DB_HOST: tidb
+      DB_PORT: 4000
+      DB_USER: root
+      DB_PASSWORD: ""
+      DB_NAME: my_album_shelf
+    depends_on:
+      tidb:
+        condition: service_healthy
+    networks:
+      - my_album_shelf_network
+    command: ["node", "init.js"]
+    restart: "no"
+
+  
+  # BACKEND API (Node.js + Express)
+  
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: api
+    hostname: api
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      DB_HOST: tidb
+      DB_PORT: 4000
+      DB_USER: root
+      DB_PASSWORD: ""
+      DB_NAME: my_album_shelf
+      JWT_SECRET: "my-album-shelf-jwt-secret-change-me"
+      KAFKA_BROKER: kafka:29092
+      LOG_LEVEL: info
+      KAFKAJS_NO_PARTITIONER_WARNING: 1
+    depends_on:
+      db:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_started
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./backend/logs:/app/logs
+    networks:
+      - my_album_shelf_network
+    restart: unless-stopped
+
+  
+  # FRONTEND (React + Nginx)
+  
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: frontend
+    hostname: frontend
+    depends_on:
+      - api
+    environment:
+      REACT_APP_API_URL: http://localhost:3001
+    ports:
+      - "3000:80"
+    networks:
+      - my_album_shelf_network
+    restart: unless-stopped
+
+  
+  # CONSUMER (KafkaJS + Express dashboard)
+  consumer:
+    build:
+      context: ./consumer
+      dockerfile: Dockerfile
+    container_name: consumer
+    hostname: consumer
+    environment:
+      NODE_ENV: production
+      KAFKA_BROKER: kafka:29092
+      KAFKA_GROUP_ID: my-album-shelf-consumer-group
+      LOG_LEVEL: info
+      KAFKAJS_NO_PARTITIONER_WARNING: 1
+    depends_on:
+      - kafka
+    networks:
+      - my_album_shelf_network
+    restart: unless-stopped
+
+networks:
+  my_album_shelf_network:
+    driver: bridge
+
+volumes:
+  pd_data:
+  tikv_data:
+  ticdc_logs:
+  zk_data:
+  zk_logs:
+  kafka_data:
