@@ -1,0 +1,20 @@
+{
+  "name": "my-album-shelf-consumer",
+  "version": "1.0.0",
+  "description": "Kafka consumer service for reading messages in My Album Shelf",
+  "main": "consumer.js",
+  "scripts": {
+    "start": "node consumer.js",
+    "dev": "nodemon consumer.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "kafkajs": "^2.2.4",
+    "log4js": "^6.9.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  },
+  "author": "Jacob Smagin",
+  "license": "MIT"
+}
