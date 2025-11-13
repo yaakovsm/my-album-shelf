@@ -87,7 +87,14 @@ router.post('/login', async (req, res) => {
     await db.execute('UPDATE users SET last_login = NOW(), updated_at = NOW() WHERE id = ?',
       [user.id]);
 
-    logger.info('Login success', { userId: user.id, email: user.email });
+    // Log login activity in JSON format with all required fields
+    logger.info('User login', {
+      timestamp: new Date().toISOString(),
+      userId: user.id,
+      action: 'LOGIN',
+      ipAddress: req.ip,
+      email: user.email
+    });
 
     if (kafkaProducer?.sendUserActivity) {
       kafkaProducer.sendUserActivity('LOGIN', user.id, req.ip, { email: user.email }).catch(() => {});

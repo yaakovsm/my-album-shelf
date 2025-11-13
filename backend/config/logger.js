@@ -4,7 +4,7 @@ log4js.configure({
   appenders: {
     console: {
       type: 'stdout',
-      layout: { type: 'pattern', pattern: '%d [%p] %c - %m' }
+      layout: { type: 'json', separator: ',' }
     },
     file: {
       type: 'file',
