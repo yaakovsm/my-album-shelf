@@ -153,15 +153,12 @@ services:
       sh -c "
         echo 'Waiting for TiCDC to be ready...' &&
         sleep 40 &&
-        echo 'Creating changefeed for ALL tables in my_album_shelf database...' &&
-        /cdc cli changefeed create
-          --server=http://ticdc:8300
-          --changefeed-id='my-album-shelf-cdc'
-          --sink-uri='kafka://kafka:29092/tidb_changes?protocol=canal-json'
-          --rules-filter='my_album_shelf.*'
-        && echo 'Changefeed created successfully'
+        echo '[filter]' > /tmp/changefeed.toml &&
+        echo 'rules = [\"my_album_shelf.*\"]' >> /tmp/changefeed.toml &&
+        echo 'Creating changefeed for my_album_shelf.* tables...' &&
+        /cdc cli changefeed create --server=http://ticdc:8300 --changefeed-id='my-album-shelf-cdc' --sink-uri='kafka://kafka:29092/tidb_changes?protocol=canal-json' --config=/tmp/changefeed.toml &&
+        echo 'Changefeed created successfully'
       "
-
   
   # DB INIT (run db/init.js once)
   db:
